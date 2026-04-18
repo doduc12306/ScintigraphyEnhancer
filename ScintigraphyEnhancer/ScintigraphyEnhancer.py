@@ -55,12 +55,46 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
     def setup(self):
         super().setup()
 
-        self.layout.addWidget(self._createInputSection())
-        self.layout.addWidget(self._createActionSection())
-        self.layout.addWidget(self._createAdvancedSection())
-        self.layout.addWidget(self._createGuidanceSection())
+        mainHLayout = qt.QHBoxLayout()
+        self.layout.addLayout(mainHLayout)
 
-        self.layout.addStretch(1)
+        leftVLayout = qt.QVBoxLayout()
+        mainHLayout.addLayout(leftVLayout)
+
+        leftVLayout.addWidget(self._createInputSection())
+        leftVLayout.addWidget(self._createActionSection())
+        leftVLayout.addWidget(self._createAdvancedSection())
+        leftVLayout.addWidget(self._createGuidanceSection())
+        leftVLayout.addStretch(1)
+
+        rightVLayout = qt.QVBoxLayout()
+        rightVLayout.setAlignment(qt.Qt.AlignTop | qt.Qt.AlignHCenter)
+        mainHLayout.addLayout(rightVLayout)
+
+        sliderLabel = qt.QLabel("SUV Max\n(Ngưỡng trên)")
+        sliderLabel.alignment = qt.Qt.AlignCenter
+        sliderLabel.setStyleSheet("font-weight: bold;")
+        rightVLayout.addWidget(sliderLabel)
+
+        self.thresholdSlider = ctk.ctkDoubleSlider()
+        self.thresholdSlider.orientation = qt.Qt.Vertical
+        self.thresholdSlider.singleStep = 1.0
+        self.thresholdSlider.minimum = 0.0
+        self.thresholdSlider.maximum = 1000.0
+        self.thresholdSlider.value = 1000.0
+        self.thresholdSlider.toolTip = "Điều chỉnh ngưỡng hiển thị tối đa"
+        self.thresholdSlider.minimumHeight = 400
+        rightVLayout.addWidget(self.thresholdSlider, 1, qt.Qt.AlignHCenter)
+
+        self.thresholdSpinBox = ctk.ctkDoubleSpinBox()
+        self.thresholdSpinBox.decimals = 2
+        self.thresholdSpinBox.minimum = 0.0
+        self.thresholdSpinBox.maximum = 1000.0
+        self.thresholdSpinBox.value = 1000.0
+        rightVLayout.addWidget(self.thresholdSpinBox)
+
+        self.thresholdSlider.connect("valueChanged(double)", self.thresholdSpinBox.setValue)
+        self.thresholdSpinBox.connect("valueChanged(double)", self.thresholdSlider.setValue)
 
         self._connectSignals()
         self._setControlsEnabled(False)
@@ -133,27 +167,7 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
         formLayout.addRow(self.invertLutCheckBox)
         return groupBox
 
-    def _createThresholdSection(self):
-        groupBox = ctk.ctkCollapsibleButton()
-        groupBox.text = "Ngưỡng hiển thị (Threshold)"
-        groupBox.collapsed = True
-        formLayout = qt.QFormLayout(groupBox)
 
-        self.thresholdEnableCheckBox = qt.QCheckBox("Bật threshold")
-        self.thresholdEnableCheckBox.checked = False
-
-        self.thresholdRangeWidget = ctk.ctkRangeWidget()
-        self.thresholdRangeWidget.decimals = 2
-        self.thresholdRangeWidget.singleStep = 1.0
-        self.thresholdRangeWidget.minimum = 0.0
-        self.thresholdRangeWidget.maximum = 1000.0
-        self.thresholdRangeWidget.minimumValue = 0.0
-        self.thresholdRangeWidget.maximumValue = 1000.0
-        self.thresholdRangeWidget.toolTip = "Điều chỉnh cận dưới/cận trên để lọc hiển thị"
-
-        formLayout.addRow(self.thresholdEnableCheckBox)
-        formLayout.addRow("Khoảng threshold:", self.thresholdRangeWidget)
-        return groupBox
 
     def _createSmoothingSection(self):
         groupBox = ctk.ctkCollapsibleButton()
@@ -186,7 +200,6 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
         self.advancedAutoAdjustButton.toolTip = "Tự động chỉnh window/level, threshold và mapping cường độ"
         layout.addWidget(self.advancedAutoAdjustButton)
         layout.addWidget(self._createWindowLevelSection())
-        layout.addWidget(self._createThresholdSection())
         layout.addWidget(self._createColorSection())
         layout.addWidget(self._createSmoothingSection())
         return groupBox
@@ -228,8 +241,7 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
         self.inputVolumeSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onInputVolumeChanged)
         self.windowSlider.connect("valueChanged(double)", self.onWindowLevelChanged)
         self.levelSlider.connect("valueChanged(double)", self.onWindowLevelChanged)
-        self.thresholdEnableCheckBox.connect("toggled(bool)", self.onThresholdChanged)
-        self.thresholdRangeWidget.connect("valuesChanged(double,double)", self.onThresholdChanged)
+        self.thresholdSlider.connect("valueChanged(double)", self.onThresholdChanged)
         self.colormapComboBox.connect("currentTextChanged(QString)", self.onColormapChanged)
         self.invertLutCheckBox.connect("toggled(bool)", self.onColormapChanged)
         self.applySmoothingButton.connect("clicked()", self.onApplySmoothing)
@@ -240,8 +252,8 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
     def _setControlsEnabled(self, enabled):
         self.windowSlider.enabled = enabled
         self.levelSlider.enabled = enabled
-        self.thresholdEnableCheckBox.enabled = enabled
-        self.thresholdRangeWidget.enabled = enabled
+        self.thresholdSlider.enabled = enabled
+        self.thresholdSpinBox.enabled = enabled
         self.colormapComboBox.enabled = enabled
         self.invertLutCheckBox.enabled = enabled
         self.sigmaSlider.enabled = enabled
@@ -288,12 +300,9 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
         if not displayNode:
             return
 
-        if self.thresholdEnableCheckBox.checked:
-            displayNode.ApplyThresholdOn()
-            displayNode.SetLowerThreshold(self.thresholdRangeWidget.minimumValue)
-            displayNode.SetUpperThreshold(self.thresholdRangeWidget.maximumValue)
-        else:
-            displayNode.ApplyThresholdOff()
+        displayNode.ApplyThresholdOn()
+        displayNode.SetLowerThreshold(0.0)
+        displayNode.SetUpperThreshold(self.thresholdSlider.value)
 
     def onColormapChanged(self, *args):
         del args
@@ -384,9 +393,7 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
         self._updatingWindowLevelSliders = False
 
         self._updatingThresholdRange = True
-        self.thresholdEnableCheckBox.checked = True
-        self.thresholdRangeWidget.minimumValue = 0.0
-        self.thresholdRangeWidget.maximumValue = 255.0
+        self.thresholdSlider.value = 255.0
         self._updatingThresholdRange = False
 
         self._updatingColormap = True
@@ -434,11 +441,7 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
                 displayNode.SetWindow(state["window"])
                 displayNode.SetLevel(state["level"])
 
-            if state.get("applyThreshold") is not None:
-                if state["applyThreshold"]:
-                    displayNode.ApplyThresholdOn()
-                else:
-                    displayNode.ApplyThresholdOff()
+            displayNode.ApplyThresholdOn()
 
             if state.get("lowerThreshold") is not None:
                 displayNode.SetLowerThreshold(state["lowerThreshold"])
@@ -525,16 +528,12 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
         self._updatingWindowLevelSliders = False
 
         self._updatingThresholdRange = True
-        self.thresholdRangeWidget.minimum = minValue
-        self.thresholdRangeWidget.maximum = maxValue
-        lowerThreshold = min(max(displayNode.GetLowerThreshold(), minValue), maxValue)
+        self.thresholdSlider.minimum = minValue
+        self.thresholdSlider.maximum = maxValue
+        self.thresholdSpinBox.minimum = minValue
+        self.thresholdSpinBox.maximum = maxValue
         upperThreshold = min(max(displayNode.GetUpperThreshold(), minValue), maxValue)
-        if lowerThreshold > upperThreshold:
-            lowerThreshold = minValue
-            upperThreshold = maxValue
-        self.thresholdRangeWidget.minimumValue = lowerThreshold
-        self.thresholdRangeWidget.maximumValue = upperThreshold
-        self.thresholdEnableCheckBox.checked = bool(displayNode.GetApplyThreshold())
+        self.thresholdSlider.value = upperThreshold
         self._updatingThresholdRange = False
 
         colorNode = displayNode.GetColorNode()
