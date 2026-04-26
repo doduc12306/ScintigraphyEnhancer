@@ -52,8 +52,16 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
             "PET-DICOM": ["PET-DICOM", "PET DICOM"],
         }
 
+        # --- Normalize click state ---
+        self._normalizeActive = False
+        self._normalizeObserverTags = []  # list of (interactor, tagId)
+
     def setup(self):
         super().setup()
+
+        # Tìm đường dẫn thư mục Icons
+        import os
+        iconsPath = os.path.join(os.path.dirname(__file__), "Resources", "Icons")
 
         mainHLayout = qt.QHBoxLayout()
         self.layout.addLayout(mainHLayout)
@@ -62,45 +70,63 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
         mainHLayout.addLayout(leftVLayout)
 
         leftVLayout.addWidget(self._createInputSection())
-        leftVLayout.addWidget(self._createActionSection())
+        leftVLayout.addWidget(self._createActionSection(iconsPath))
         leftVLayout.addWidget(self._createAdvancedSection())
-        leftVLayout.addWidget(self._createGuidanceSection())
         leftVLayout.addStretch(1)
 
+        # --- Cột phải: Threshold (Range Slider dọc, 1 thanh 2 handle) ---
         rightVLayout = qt.QVBoxLayout()
         rightVLayout.setAlignment(qt.Qt.AlignTop | qt.Qt.AlignHCenter)
         mainHLayout.addLayout(rightVLayout)
 
-        sliderLabel = qt.QLabel("SUV Max\n(Ngưỡng trên)")
+        sliderLabel = qt.QLabel("Threshold")
         sliderLabel.alignment = qt.Qt.AlignCenter
         sliderLabel.setStyleSheet("font-weight: bold;")
         rightVLayout.addWidget(sliderLabel)
 
-        self.thresholdSlider = ctk.ctkDoubleSlider()
-        self.thresholdSlider.orientation = qt.Qt.Vertical
-        self.thresholdSlider.singleStep = 1.0
-        self.thresholdSlider.minimum = 0.0
-        self.thresholdSlider.maximum = 1000.0
-        self.thresholdSlider.value = 1000.0
-        self.thresholdSlider.toolTip = "Điều chỉnh ngưỡng hiển thị tối đa"
-        self.thresholdSlider.minimumHeight = 400
-        rightVLayout.addWidget(self.thresholdSlider, 1, qt.Qt.AlignHCenter)
+        # SpinBox ngưỡng trên
+        self.upperThresholdSpinBox = ctk.ctkDoubleSpinBox()
+        self.upperThresholdSpinBox.decimals = 2
+        self.upperThresholdSpinBox.minimum = 0.0
+        self.upperThresholdSpinBox.maximum = 1000.0
+        self.upperThresholdSpinBox.value = 1000.0
+        self.upperThresholdSpinBox.setFixedWidth(100)
+        self.upperThresholdSpinBox.toolTip = "Ngưỡng trên (Upper)"
+        rightVLayout.addWidget(self.upperThresholdSpinBox, 0, qt.Qt.AlignHCenter)
 
-        self.thresholdSpinBox = ctk.ctkDoubleSpinBox()
-        self.thresholdSpinBox.decimals = 2
-        self.thresholdSpinBox.minimum = 0.0
-        self.thresholdSpinBox.maximum = 1000.0
-        self.thresholdSpinBox.value = 1000.0
-        rightVLayout.addWidget(self.thresholdSpinBox)
+        # Range Slider dọc (1 thanh, 2 handle)
+        self.thresholdRangeSlider = ctk.ctkDoubleRangeSlider()
+        self.thresholdRangeSlider.orientation = qt.Qt.Vertical
+        self.thresholdRangeSlider.singleStep = 1.0
+        self.thresholdRangeSlider.minimum = 0.0
+        self.thresholdRangeSlider.maximum = 1000.0
+        self.thresholdRangeSlider.minimumValue = 0.0
+        self.thresholdRangeSlider.maximumValue = 1000.0
+        self.thresholdRangeSlider.toolTip = "Kéo handle trên/dưới để chỉnh ngưỡng"
+        self.thresholdRangeSlider.minimumHeight = 400
+        rightVLayout.addWidget(self.thresholdRangeSlider, 1, qt.Qt.AlignHCenter)
 
-        self.thresholdSlider.connect("valueChanged(double)", self.thresholdSpinBox.setValue)
-        self.thresholdSpinBox.connect("valueChanged(double)", self.thresholdSlider.setValue)
+        # SpinBox ngưỡng dưới
+        self.lowerThresholdSpinBox = ctk.ctkDoubleSpinBox()
+        self.lowerThresholdSpinBox.decimals = 2
+        self.lowerThresholdSpinBox.minimum = 0.0
+        self.lowerThresholdSpinBox.maximum = 1000.0
+        self.lowerThresholdSpinBox.value = 0.0
+        self.lowerThresholdSpinBox.setFixedWidth(100)
+        self.lowerThresholdSpinBox.toolTip = "Ngưỡng dưới (Lower)"
+        rightVLayout.addWidget(self.lowerThresholdSpinBox, 0, qt.Qt.AlignHCenter)
+
+        # Đồng bộ range slider ↔ spinboxes
+        self.thresholdRangeSlider.connect("maximumValueChanged(double)", self.upperThresholdSpinBox.setValue)
+        self.thresholdRangeSlider.connect("minimumValueChanged(double)", self.lowerThresholdSpinBox.setValue)
+        self.upperThresholdSpinBox.connect("valueChanged(double)", self._onUpperSpinBoxChanged)
+        self.lowerThresholdSpinBox.connect("valueChanged(double)", self._onLowerSpinBoxChanged)
 
         self._connectSignals()
         self._setControlsEnabled(False)
 
     def cleanup(self):
-        pass
+        self._removeNormalizeObservers()
 
     def _createInputSection(self):
         groupBox = ctk.ctkCollapsibleButton()
@@ -204,56 +230,93 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
         layout.addWidget(self._createSmoothingSection())
         return groupBox
 
-    def _createGuidanceSection(self):
-        groupBox = ctk.ctkCollapsibleButton()
-        groupBox.text = "Hướng dẫn nhanh cho bác sĩ"
-        groupBox.collapsed = False
-        formLayout = qt.QFormLayout(groupBox)
-
-        guidanceLabel = qt.QLabel(
-            "1) Dùng 'Thiết lập PET-DICOM nhanh' cho thao tác thường quy (chỉ đổi LUT + invert).\n"
-            "2) Nếu cần tự chỉnh Window/Level/Threshold theo thuật toán: mở mục Nâng cao và bấm 'Tự chỉnh WL/Threshold'.\n"
-            "3) Giảm nhiễu Bilateral: PET thường Sigma 1.0-1.2; SPECT 1.2-2.0.\n"
-            "4) Khi cần quay về trạng thái ban đầu, bấm 'Khôi phục'."
-        )
-        guidanceLabel.wordWrap = True
-        formLayout.addRow(guidanceLabel)
-        return groupBox
-
-    def _createActionSection(self):
+    def _createActionSection(self, iconsPath):
+        import os
         groupBox = ctk.ctkCollapsibleButton()
         groupBox.text = "Thao tác"
         groupBox.collapsed = False
-        layout = qt.QHBoxLayout(groupBox)
+        layout = qt.QVBoxLayout(groupBox)
 
-        self.autoAdjustButton = qt.QPushButton("Thiết lập PET-DICOM nhanh")
-        self.autoAdjustButton.toolTip = "Đặt LUT PET-DICOM và bật Invert LUT"
-        self.autoAdjustButton.setStyleSheet("font-weight: 600;")
+        btnLayout = qt.QHBoxLayout()
+        iconSize = qt.QSize(40, 40)
 
-        self.resetButton = qt.QPushButton("Khôi phục")
-        self.resetButton.toolTip = "Khôi phục trạng thái ban đầu của volume đang chọn"
+        self.autoAdjustButton = qt.QPushButton()
+        petIconPath = os.path.join(iconsPath, "PetDicom.png")
+        if os.path.exists(petIconPath):
+            self.autoAdjustButton.setIcon(qt.QIcon(petIconPath))
+            self.autoAdjustButton.setIconSize(iconSize)
+        else:
+            self.autoAdjustButton.text = "PET"
+        self.autoAdjustButton.toolTip = "Thiết lập PET-DICOM nhanh (LUT + Invert)"
+        self.autoAdjustButton.setStyleSheet("font-weight: 600; padding: 6px;")
+        self.autoAdjustButton.setFixedSize(60, 60)
 
-        layout.addWidget(self.autoAdjustButton)
-        layout.addWidget(self.resetButton)
+        self.normalizeToggleButton = qt.QPushButton()
+        normalizeIconPath = os.path.join(iconsPath, "Normalize.png")
+        if os.path.exists(normalizeIconPath):
+            self.normalizeToggleButton.setIcon(qt.QIcon(normalizeIconPath))
+            self.normalizeToggleButton.setIconSize(iconSize)
+        else:
+            self.normalizeToggleButton.text = "⊕"
+        self.normalizeToggleButton.checkable = True
+        self.normalizeToggleButton.checked = False
+        self.normalizeToggleButton.toolTip = "Bật/tắt chọn điểm tham chiếu (click trái trên ảnh)"
+        self.normalizeToggleButton.setStyleSheet(
+            "QPushButton { padding: 6px; }"
+            "QPushButton:checked { background-color: #2196F3; }"
+        )
+        self.normalizeToggleButton.setFixedSize(60, 60)
+
+        self.resetButton = qt.QPushButton()
+        resetIconPath = os.path.join(iconsPath, "Reset.png")
+        if os.path.exists(resetIconPath):
+            self.resetButton.setIcon(qt.QIcon(resetIconPath))
+            self.resetButton.setIconSize(iconSize)
+        else:
+            self.resetButton.text = "↺"
+        self.resetButton.toolTip = "Khôi phục trạng thái ban đầu"
+        self.resetButton.setStyleSheet("padding: 6px;")
+        self.resetButton.setFixedSize(60, 60)
+
+        btnLayout.addWidget(self.autoAdjustButton)
+        btnLayout.addWidget(self.normalizeToggleButton)
+        btnLayout.addWidget(self.resetButton)
+        
+        layout.addLayout(btnLayout)
+
+        self.normalizeInfoLabel = qt.QLabel("Ref: --")
+        self.normalizeInfoLabel.setStyleSheet("color: #666; font-size: 11px;")
+        self.normalizeInfoLabel.setAlignment(qt.Qt.AlignCenter)
+        layout.addWidget(self.normalizeInfoLabel)
+
         return groupBox
 
     def _connectSignals(self):
         self.inputVolumeSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onInputVolumeChanged)
         self.windowSlider.connect("valueChanged(double)", self.onWindowLevelChanged)
         self.levelSlider.connect("valueChanged(double)", self.onWindowLevelChanged)
-        self.thresholdSlider.connect("valueChanged(double)", self.onThresholdChanged)
+        self.thresholdRangeSlider.connect("minimumValueChanged(double)", self.onThresholdChanged)
+        self.thresholdRangeSlider.connect("maximumValueChanged(double)", self.onThresholdChanged)
         self.colormapComboBox.connect("currentTextChanged(QString)", self.onColormapChanged)
         self.invertLutCheckBox.connect("toggled(bool)", self.onColormapChanged)
         self.applySmoothingButton.connect("clicked()", self.onApplySmoothing)
         self.autoAdjustButton.connect("clicked()", self.onAutoAdjust)
         self.advancedAutoAdjustButton.connect("clicked()", self.onAutoAdjustAdvanced)
         self.resetButton.connect("clicked()", self.onReset)
+        self.normalizeToggleButton.connect("toggled(bool)", self.onNormalizeToggled)
+
+    def _onUpperSpinBoxChanged(self, value):
+        self.thresholdRangeSlider.maximumValue = value
+
+    def _onLowerSpinBoxChanged(self, value):
+        self.thresholdRangeSlider.minimumValue = value
 
     def _setControlsEnabled(self, enabled):
         self.windowSlider.enabled = enabled
         self.levelSlider.enabled = enabled
-        self.thresholdSlider.enabled = enabled
-        self.thresholdSpinBox.enabled = enabled
+        self.thresholdRangeSlider.enabled = enabled
+        self.upperThresholdSpinBox.enabled = enabled
+        self.lowerThresholdSpinBox.enabled = enabled
         self.colormapComboBox.enabled = enabled
         self.invertLutCheckBox.enabled = enabled
         self.sigmaSlider.enabled = enabled
@@ -261,6 +324,9 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
         self.autoAdjustButton.enabled = enabled
         self.advancedAutoAdjustButton.enabled = enabled
         self.resetButton.enabled = enabled
+        self.normalizeToggleButton.enabled = enabled
+        if not enabled:
+            self.normalizeToggleButton.checked = False
 
     def onInputVolumeChanged(self, node):
         self._selectedVolumeNode = node
@@ -283,9 +349,32 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
         if not displayNode:
             return
 
+        ww = self.windowSlider.value
+        wl = self.levelSlider.value
+
         displayNode.SetAutoWindowLevel(False)
-        displayNode.SetWindow(self.windowSlider.value)
-        displayNode.SetLevel(self.levelSlider.value)
+        displayNode.SetWindow(ww)
+        displayNode.SetLevel(wl)
+
+        # Đồng bộ threshold từ W/L: lower = WL - WW/2, upper = WL + WW/2
+        self._updatingThresholdRange = True
+        newLower = wl - ww / 2.0
+        newUpper = wl + ww / 2.0
+        
+        safeLower = max(self.thresholdRangeSlider.minimum, min(newLower, self.thresholdRangeSlider.maximum))
+        safeUpper = min(self.thresholdRangeSlider.maximum, max(newUpper, self.thresholdRangeSlider.minimum))
+        safeUpper = max(safeLower, safeUpper)
+        
+        self.thresholdRangeSlider.minimumValue = safeLower
+        self.thresholdRangeSlider.maximumValue = safeUpper
+        self.lowerThresholdSpinBox.value = safeLower
+        self.upperThresholdSpinBox.value = safeUpper
+        
+        displayNode.ApplyThresholdOn()
+        displayNode.SetLowerThreshold(safeLower)
+        displayNode.SetUpperThreshold(safeUpper)
+        
+        self._updatingThresholdRange = False
 
     def onThresholdChanged(self, *args):
         del args
@@ -300,9 +389,24 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
         if not displayNode:
             return
 
+        lower = self.thresholdRangeSlider.minimumValue
+        upper = self.thresholdRangeSlider.maximumValue
+
         displayNode.ApplyThresholdOn()
-        displayNode.SetLowerThreshold(0.0)
-        displayNode.SetUpperThreshold(self.thresholdSlider.value)
+        displayNode.SetLowerThreshold(lower)
+        displayNode.SetUpperThreshold(upper)
+
+        # Đồng bộ W/L từ threshold: WW = upper - lower, WL = (upper + lower) / 2
+        self._updatingWindowLevelSliders = True
+        newWW = max(1.0, upper - lower)
+        newWL = (upper + lower) / 2.0
+        self.windowSlider.value = newWW
+        self.levelSlider.value = newWL
+        self._updatingWindowLevelSliders = False
+
+        displayNode.SetAutoWindowLevel(False)
+        displayNode.SetWindow(newWW)
+        displayNode.SetLevel(newWL)
 
     def onColormapChanged(self, *args):
         del args
@@ -352,13 +456,61 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
             slicer.util.warningDisplay("Vui lòng chọn volume đầu vào.", windowTitle="ScintigraphyEnhancer")
             return
 
+        # Áp dụng PET-DICOM LUT
         self._updatingColormap = True
         self.colormapComboBox.setCurrentText("PET-DICOM")
         self.invertLutCheckBox.checked = True
         self._updatingColormap = False
         self.onColormapChanged()
 
-        slicer.util.showStatusMessage("Đã đặt LUT PET-DICOM và Invert LUT", 3000)
+        # Đăng ký custom layout 2 view coronal dọc (đứng cạnh nhau)
+        customLayoutId = 501
+        customLayout = """
+        <layout type="horizontal" split="true">
+          <item splitSize="500">
+            <view class="vtkMRMLSliceNode" singletontag="Cor1">
+              <property name="orientation" action="default">Coronal</property>
+              <property name="viewlabel" action="default">C1</property>
+              <property name="viewcolor" action="default">#E68A00</property>
+            </view>
+          </item>
+          <item splitSize="500">
+            <view class="vtkMRMLSliceNode" singletontag="Cor2">
+              <property name="orientation" action="default">Coronal</property>
+              <property name="viewlabel" action="default">C2</property>
+              <property name="viewcolor" action="default">#D35400</property>
+            </view>
+          </item>
+        </layout>
+        """
+        layoutManager = slicer.app.layoutManager()
+        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+        
+        # Cập nhật hoặc thêm mới layout (ID 502 để tránh cache cũ nếu không khởi động lại)
+        customLayoutId = 502
+        if layoutNode.IsLayoutDescription(customLayoutId):
+            layoutNode.SetLayoutDescription(customLayoutId, customLayout)
+        else:
+            layoutNode.AddLayoutDescription(customLayoutId, customLayout)
+        
+        layoutNode.SetViewArrangement(customLayoutId)
+
+        # Gán volume vào từng view
+        slicer.app.processEvents()
+        for viewTag in ["Cor1", "Cor2"]:
+            sliceWidget = layoutManager.sliceWidget(viewTag)
+            if sliceWidget is None:
+                continue
+            sliceLogic = sliceWidget.sliceLogic()
+            compositeNode = sliceLogic.GetSliceCompositeNode()
+            compositeNode.SetBackgroundVolumeID(volumeNode.GetID())
+            sliceNode = sliceLogic.GetSliceNode()
+            sliceNode.SetOrientation("Coronal")
+            sliceNode.SetBackgroundColor(1.0, 1.0, 1.0)
+            sliceNode.SetBackgroundColor2(1.0, 1.0, 1.0)
+            sliceLogic.FitSliceToAll()
+
+        slicer.util.showStatusMessage("Layout 2 view coronal + PET-DICOM", 3000)
 
     def onAutoAdjustAdvanced(self):
         volumeNode = self._selectedVolumeNode
@@ -393,7 +545,8 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
         self._updatingWindowLevelSliders = False
 
         self._updatingThresholdRange = True
-        self.thresholdSlider.value = 255.0
+        self.thresholdRangeSlider.minimumValue = 0.0
+        self.thresholdRangeSlider.maximumValue = 255.0
         self._updatingThresholdRange = False
 
         self._updatingColormap = True
@@ -455,6 +608,11 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
             self.onColormapChanged()
 
         self._syncSlidersFromDisplayNode(volumeNode)
+
+        # Tắt chế độ Normalize khi reset
+        self.normalizeToggleButton.checked = False
+        self.normalizeInfoLabel.text = "Ref: --"
+
         slicer.util.showStatusMessage("Đã khôi phục volume về trạng thái ban đầu", 3000)
 
     def _ensureInitialStateCaptured(self, volumeNode):
@@ -528,12 +686,18 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
         self._updatingWindowLevelSliders = False
 
         self._updatingThresholdRange = True
-        self.thresholdSlider.minimum = minValue
-        self.thresholdSlider.maximum = maxValue
-        self.thresholdSpinBox.minimum = minValue
-        self.thresholdSpinBox.maximum = maxValue
+        self.thresholdRangeSlider.minimum = minValue
+        self.thresholdRangeSlider.maximum = maxValue
+        self.upperThresholdSpinBox.minimum = minValue
+        self.upperThresholdSpinBox.maximum = maxValue
+        self.lowerThresholdSpinBox.minimum = minValue
+        self.lowerThresholdSpinBox.maximum = maxValue
         upperThreshold = min(max(displayNode.GetUpperThreshold(), minValue), maxValue)
-        self.thresholdSlider.value = upperThreshold
+        lowerThreshold = min(max(displayNode.GetLowerThreshold(), minValue), maxValue)
+        self.thresholdRangeSlider.minimumValue = lowerThreshold
+        self.thresholdRangeSlider.maximumValue = upperThreshold
+        self.lowerThresholdSpinBox.value = lowerThreshold
+        self.upperThresholdSpinBox.value = upperThreshold
         self._updatingThresholdRange = False
 
         colorNode = displayNode.GetColorNode()
@@ -609,6 +773,92 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
 
         return None
 
+    # ------------------------------------------------------------------ #
+    #  Normalize Click handlers                                          #
+    # ------------------------------------------------------------------ #
+
+    def onNormalizeToggled(self, checked):
+        if checked:
+            self._installNormalizeObservers()
+            slicer.util.showStatusMessage(
+                "Chế độ Normalize: BẬT — Click chuột trái vào điểm tham chiếu", 4000
+            )
+        else:
+            self._removeNormalizeObservers()
+            slicer.util.showStatusMessage("Chế độ Normalize: TẮT", 2000)
+
+    def _installNormalizeObservers(self):
+        self._removeNormalizeObservers()
+        layoutManager = slicer.app.layoutManager()
+        for viewName in ["Red", "Green", "Yellow"]:
+            sliceWidget = layoutManager.sliceWidget(viewName)
+            if sliceWidget is None:
+                continue
+            interactor = sliceWidget.sliceView().interactor()
+            tag = interactor.AddObserver(
+                vtk.vtkCommand.LeftButtonPressEvent, self._onNormalizeClick
+            )
+            self._normalizeObserverTags.append((interactor, tag))
+
+    def _removeNormalizeObservers(self):
+        for interactor, tag in self._normalizeObserverTags:
+            try:
+                interactor.RemoveObserver(tag)
+            except Exception:
+                pass
+        self._normalizeObserverTags.clear()
+        self._normalizeActive = False
+
+    def _onNormalizeClick(self, caller, event):
+        import numpy as np
+
+        volumeNode = self._selectedVolumeNode
+        if not volumeNode:
+            return
+
+        # Lấy tọa độ RAS từ Crosshair
+        crosshairNode = slicer.util.getNode("Crosshair")
+        ras = [0.0, 0.0, 0.0]
+        crosshairNode.GetCursorPositionRAS(ras)
+
+        # Chuyển RAS → IJK
+        rasToIjk = vtk.vtkMatrix4x4()
+        volumeNode.GetRASToIJKMatrix(rasToIjk)
+        rasPoint = [ras[0], ras[1], ras[2], 1.0]
+        ijkPoint = [0, 0, 0, 1]
+        rasToIjk.MultiplyPoint(rasPoint, ijkPoint)
+        ijk = [int(round(ijkPoint[i])) for i in range(3)]
+
+        # Lấy giá trị voxel
+        volumeArray = slicer.util.arrayFromVolume(volumeNode)
+        shape = volumeArray.shape
+        if not (0 <= ijk[2] < shape[0] and 0 <= ijk[1] < shape[1] and 0 <= ijk[0] < shape[2]):
+            slicer.util.showStatusMessage("Điểm click nằm ngoài volume", 2000)
+            return
+
+        refValue = float(volumeArray[ijk[2], ijk[1], ijk[0]])
+
+        if refValue <= 0:
+            self.normalizeInfoLabel.text = "Ref: %.4f (không hợp lệ)" % refValue
+            slicer.util.showStatusMessage("Giá trị tham chiếu phải > 0", 2000)
+            return
+
+        self._ensureInitialStateCaptured(volumeNode)
+
+        try:
+            self.logic.normalizeByReferencePoint(volumeNode, refValue)
+            self.normalizeInfoLabel.text = "Ref: %.4f @ (%.0f,%.0f,%.0f)" % (
+                refValue, ras[0], ras[1], ras[2]
+            )
+            slicer.util.showStatusMessage(
+                "Đã normalize (Ref=%.4f)" % refValue, 3000
+            )
+            self._syncSlidersFromDisplayNode(volumeNode)
+        except Exception as exc:
+            logging.exception("Normalize failed")
+            self.normalizeInfoLabel.text = "Lỗi normalize"
+            slicer.util.showStatusMessage("Lỗi: %s" % exc, 3000)
+
 
 #
 # ScintigraphyEnhancerLogic
@@ -616,6 +866,25 @@ class ScintigraphyEnhancerWidget(ScriptedLoadableModuleWidget):
 
 
 class ScintigraphyEnhancerLogic(ScriptedLoadableModuleLogic):
+    def normalizeByReferencePoint(self, volumeNode, refValue):
+        """Chuẩn hóa volume: mọi voxel / refValue * 100."""
+        if volumeNode is None:
+            raise ValueError("Input volume node không hợp lệ")
+
+        refValue = float(refValue)
+        if refValue <= 0:
+            raise ValueError("Giá trị tham chiếu phải > 0")
+
+        try:
+            import numpy as np
+        except Exception as importError:
+            raise RuntimeError("Cần numpy trong Slicer để normalize") from importError
+
+        arrayData = slicer.util.arrayFromVolume(volumeNode).astype(float)
+        normalized = arrayData / refValue * 100.0
+        slicer.util.updateVolumeFromArray(volumeNode, normalized.astype(np.float32))
+        volumeNode.Modified()
+
     def applyBilateralSmoothingInPlace(self, volumeNode, sigma):
         if volumeNode is None:
             raise ValueError("Input volume node không hợp lệ")
